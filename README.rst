@@ -34,13 +34,13 @@ NB! Windows and Mac support is as of yet untested.
 Unoserver needs to be installed by and run with the same Python installation that LibreOffice uses.
 On Unix this usually means you can just install it with::
 
-   $ sudo -H pip install unoserver
+   $ sudo -H pip install unoserver-appx
 
 If you have multiple versions of LibreOffice installed, you need to install it for each one.
 Usually each LibreOffice install will have it's own `python` executable and you need to run
 `pip` with that executable::
 
-  $ sudo -H /full/path/to/python -m pip install unoserver
+  $ sudo -H /full/path/to/python -m pip install unoserver-appx
 
 To find all Python installations that have the relevant LibreOffice libraries installed,
 you can run a script called `find_uno.py`::
@@ -65,13 +65,13 @@ To install on such distributions, do the following::
 
   $ wget https://bootstrap.pypa.io/get-pip.py
   $ sudo /path/to/python get-pip.py
-  $ sudo /path/to/python -m pip install unoserver
+  $ sudo /path/to/python -m pip install unoserver-appx
 
 You can also install it in a virtualenv, if you are using the system Python
 for that virtualenv, and specify the ``--system-site-packages`` parameter::
 
   $ virtualenv --python=/usr/bin/python3 --system-site-packages virtenv
-  $ virtenv/bin/pip install unoserver
+  $ virtenv/bin/pip install unoserver-appx
 
 Windows and Mac installs aren't officially supported yet, but on Windows the
 paths to the LibreOffice Python executable are usually in locations such as
