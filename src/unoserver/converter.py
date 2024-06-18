@@ -3,16 +3,18 @@ try:
 except ImportError:
     raise ImportError(
         "Could not find the 'uno' library. This package must be installed with a Python "
-        "installation that has a 'uno' library. This typically means you should install "
+        "installation that has a 'uno' library. This typically means you should install"
         "it with the same Python executable as your Libreoffice installation uses."
     )
 
+import argparse
 import io
 import logging
 import os
+import sys
 import unohelper
+import re
 
-from pathlib import Path
 from com.sun.star.beans import PropertyValue
 from com.sun.star.io import XOutputStream
 
@@ -46,7 +48,7 @@ def get_doc_type(doc):
     # adding document types, which seems unlikely.
     raise RuntimeError(
         "The input document is of an unknown document type. This is probably a bug.\n"
-        "Please create an issue at https://github.com/unoconv/unoserver."
+        "Please create an issue at https://github.com/unoconv/unoserver ."
     )
 
 
@@ -62,11 +64,6 @@ class OutputStream(unohelper.Base, XOutputStream):
 
 
 class UnoConverter:
-    """The class that performs the conversion
-
-    Don't use this directly, instead use the client.UnoConverter.
-    """
-
     def __init__(self, interface="127.0.0.1", port="2002"):
         logger.info("Starting unoconverter.")
 
@@ -89,7 +86,15 @@ class UnoConverter:
         )
 
     def find_filter(self, import_type, export_type):
-        for export_filter in self.get_available_export_filters():
+        # List export filters. You can only search on module, iflags and eflags,
+        # so the import and export types we have to test in a loop
+        export_filters = self.filter_service.createSubSetEnumerationByQuery(
+            "getSortedFilterList():iflags=2"
+        )
+
+        while export_filters.hasMoreElements():
+            # Filter DocumentService here
+            export_filter = prop2dict(export_filters.nextElement())
             if export_filter["DocumentService"] != import_type:
                 continue
             if export_filter["Type"] != export_type:
@@ -102,54 +107,7 @@ class UnoConverter:
         # No filter found
         return None
 
-    def get_available_import_filters(self):
-        # List import filters. You can only search on module, iflags and eflags,
-        # so the import and export types we have to test in a loop
-        import_filters = self.filter_service.createSubSetEnumerationByQuery(
-            "getSortedFilterList():iflags=1"
-        )
-
-        while import_filters.hasMoreElements():
-            # Filter DocumentService here
-            yield prop2dict(import_filters.nextElement())
-
-    def get_available_export_filters(self):
-        # List export filters. You can only search on module, iflags and eflags,
-        # so the import and export types we have to test in a loop
-        export_filters = self.filter_service.createSubSetEnumerationByQuery(
-            "getSortedFilterList():iflags=2"
-        )
-
-        while export_filters.hasMoreElements():
-            # Filter DocumentService here
-            yield prop2dict(export_filters.nextElement())
-
-    def get_filter_names(self, filters):
-        names = {}
-        for flt in filters:
-            # Add all names and exstensions, etc in a mapping to the internal
-            # Libreoffice name, so we can map it.
-            # The actual name:
-            names[flt["Name"]] = flt["Name"]
-            # UserData sometimes has file extensions, etc.
-            # Skip empty data, and those weird file paths, and "true"...
-            for name in filter(
-                lambda x: x and x != "true" and "." not in x, flt["UserData"]
-            ):
-                names[name] = flt["Name"]
-        return names
-
-    def convert(
-        self,
-        inpath=None,
-        indata=None,
-        outpath=None,
-        convert_to=None,
-        filtername=None,
-        filter_options=[],
-        update_index=True,
-        infiltername=None,
-    ):
+    def convert(self, inpath=None, indata=None, outpath=None, convert_to=None):
         """Converts a file from one type to another
 
         inpath: A path (on the local hard disk) to a file to be converted.
@@ -160,84 +118,72 @@ class UnoConverter:
                  the content of the converted file will be returned as a byte string.
 
         convert_to: The extension of the desired file type, ie "pdf", "xlsx", etc.
-
-        filtername: The name of the export filter to use for conversion. If None, it is auto-detected.
-
-        filter_options: A list of output filter options as strings, in a "OptionName=Value" format.
-
-        update_index: Updates the index before conversion
-
-        infiltername: The name of the input filter, ie "writer8", "PowerPoint 3", etc.
-
-        You must specify the inpath or the indata, and you must specify and outpath or a convert_to.
         """
+        if inpath is None and indata is None:
+            raise RuntimeError("Nothing to convert.")
+
+        if inpath is not None and indata is not None:
+            raise RuntimeError("You can only pass in inpath or indata, not both.")
+
+        if outpath is None and convert_to is None:
+            raise RuntimeError(
+                "If you don't specify an output path, you must specify a file-type."
+            )
+
         input_props = (PropertyValue(Name="ReadOnly", Value=True),)
-        if infiltername:
-            infilters = self.get_filter_names(self.get_available_import_filters())
-            if infiltername in infilters:
-                input_props += (
-                    PropertyValue(Name="FilterName", Value=infilters[infiltername]),
-                )
-            else:
-                raise ValueError(
-                    f"There is no '{infiltername}' import filter. Available filters: {sorted(infilters.keys())}"
-                )
 
         if inpath:
             # TODO: Verify that inpath exists and is openable, and that outdir exists, because uno's
             # exceptions are completely useless!
 
-            if not Path(inpath).exists():
-                raise RuntimeError(f"Path {inpath} does not exist.")
-
             # Load the document
-            logger.info(f"Opening {inpath} for input")
             import_path = uno.systemPathToFileUrl(os.path.abspath(inpath))
+            # This returned None if the file was locked, I'm hoping the ReadOnly flag avoids that.
+            logger.info(f"Opening {inpath}")
 
         elif indata:
             # The document content is passed in as a byte string
-            logger.info("Opening private:stream for input")
-            old_stream = self.service.createInstanceWithContext(
+            input_stream = self.service.createInstanceWithContext(
                 "com.sun.star.io.SequenceInputStream", self.context
             )
-            old_stream.initialize((uno.ByteSequence(indata),))
-            input_props += (PropertyValue(Name="InputStream", Value=old_stream),)
+            input_stream.initialize((uno.ByteSequence(indata),))
+            input_props += (PropertyValue(Name="InputStream", Value=input_stream),)
             import_path = "private:stream"
 
         document = self.desktop.loadComponentFromURL(
             import_path, "_default", 0, input_props
         )
 
-        if document is None:
-            # Could not load document, fail
-            if not inpath:
-                inpath = "<remote file>"
-            if not infiltername:
-                infiltername = "default"
-
-            error = f"Could not load document {inpath} using the {infiltername} filter."
-            logger.error(error)
-            raise RuntimeError(error)
-
-        if update_index:
-            # Update document indexes
-            for ii in range(2):
-                # At first, update Table-of-Contents.
-                # ToC grows, so page numbers grow too.
-                # On second turn, update page numbers in ToC.
-                try:
-                    document.refresh()
-                    indexes = document.getDocumentIndexes()
-                except AttributeError:
-                    # The document doesn't implement the XRefreshable and/or
-                    # XDocumentIndexesSupplier interfaces
-                    break
-                else:
-                    for i in range(0, indexes.getCount()):
-                        indexes.getByIndex(i).update()
-
         # Now do the conversion
         try:
+            embeddedObjects = document.getEmbeddedObjects()
+            elementNames = embeddedObjects.getElementNames()
+        
+            for i in range(len(elementNames)):
+                element = embeddedObjects.getByIndex(i).Model
+                if element is not None and element.supportsService('com.sun.star.formula.FormulaProperties'):
+                    element.Formula = element.Formula.replace("{-}", "{-1}")
+                    element.Formula = element.Formula.replace("{+}", "{+1}")
+                    element.Formula = element.Formula.replace("=", "\"=\"")
+                    element.Formula = element.Formula.replace("|", "\"|\"")
+                    element.Formula = element.Formula.replace("left", "")
+                    element.Formula = element.Formula.replace("right", "")
+                    element.Formula = element.Formula.replace("none", "")
+                    if re.search("\{\d\+\}", element.Formula):
+                       element.Formula = element.Formula.replace("+}", "\"+\"}")
+
+                    if re.search("\{\d-\}", element.Formula):
+                       element.Formula = element.Formula.replace("-}", "\"-\"}")
+                       
+                    if(element.Formula.endswith("-")):
+                        parts = element.Formula.rsplit("-", 1)
+                        element.Formula = parts[0] + "\"-\"" + parts[1]
+                        
+                    if(element.Formula.endswith("+")):
+                        parts = element.Formula.rsplit("+", 1)
+                        element.Formula = parts[0] + "\"+\"" + parts[1] 
+                       
+                        
             # Figure out document type:
             import_type = get_doc_type(document)
 
@@ -263,36 +209,15 @@ class UnoConverter:
                     f"Unknown export file type, unknown extension '{extension}'"
                 )
 
-            if filtername is not None:
-                available_filter_names = self.get_filter_names(
-                    self.get_available_export_filters()
+            filtername = self.find_filter(import_type, export_type)
+            if filtername is None:
+                raise RuntimeError(
+                    f"Could not find an export filter from {import_type} to {export_type}"
                 )
-                if filtername not in available_filter_names:
-                    raise RuntimeError(
-                        f"There is no '{filtername}' export-filter. Available filters: {sorted(available_filter_names)}"
-                    )
-            else:
-                filtername = self.find_filter(import_type, export_type)
-                if filtername is None:
-                    raise RuntimeError(
-                        f"Could not find an export filter from {import_type} to {export_type}"
-                    )
 
             logger.info(f"Exporting to {outpath}")
-            logger.info(
-                f"Using {filtername} export filter from {infiltername} to {export_type}"
-            )
+            logger.info(f"Using {filtername} export filter")
 
-            filter_data = []
-            for option in filter_options:
-                option_name, option_value = option.split("=", maxsplit=1)
-                if option_value == "false":
-                    option_value = False
-                elif option_value == "true":
-                    option_value = True
-                elif option_value.isdecimal():
-                    option_value = int(option_value)
-                filter_data.append(PropertyValue(Name=option_name, Value=option_value))
             output_props = (
                 PropertyValue(Name="FilterName", Value=filtername),
                 PropertyValue(Name="Overwrite", Value=True),
@@ -301,15 +226,6 @@ class UnoConverter:
                 output_stream = OutputStream()
                 output_props += (
                     PropertyValue(Name="OutputStream", Value=output_stream),
-                )
-            if filter_data:
-                output_props += (
-                    PropertyValue(
-                        Name="FilterData",
-                        Value=uno.Any(
-                            "[]com.sun.star.beans.PropertyValue", tuple(filter_data)
-                        ),
-                    ),
                 )
             document.storeToURL(export_path, output_props)
 
@@ -320,3 +236,51 @@ class UnoConverter:
             return output_stream.buffer.getvalue()
         else:
             return None
+
+
+def main():
+    logging.basicConfig()
+    logger.setLevel(logging.DEBUG)
+
+    parser = argparse.ArgumentParser("unoconvert")
+    parser.add_argument(
+        "infile", help="The path to the file to be converted (use - for stdin)"
+    )
+    parser.add_argument(
+        "outfile", help="The path to the converted file (use - for stdout)"
+    )
+    parser.add_argument(
+        "--convert-to",
+        help="The file type/extension of the output file (ex pdf). Required when using stdout",
+    )
+    parser.add_argument(
+        "--interface", default="127.0.0.1", help="The interface used by the server"
+    )
+    parser.add_argument("--port", default="2002", help="The port used by the server")
+    args = parser.parse_args()
+
+    converter = UnoConverter(args.interface, args.port)
+
+    if args.outfile == "-":
+        # Set outfile to None, to get the data returned from the function,
+        # instead of written to a file.
+        args.outfile = None
+
+    if args.infile == "-":
+        # Get data from stdin
+        indata = sys.stdin.buffer.read()
+        result = converter.convert(
+            indata=indata, outpath=args.outfile, convert_to=args.convert_to
+        )
+    else:
+        result = converter.convert(
+            inpath=args.infile, outpath=args.outfile, convert_to=args.convert_to
+        )
+
+    if args.outfile is None:
+        # Pipe result to stdout
+        sys.stdout.buffer.write(result)
+
+
+if __name__ == "__main__":
+    main()

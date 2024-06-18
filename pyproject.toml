@@ -3,8 +3,8 @@ requires = ["setuptools>=61.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "unoserver"
-version = "2.2.dev0"
+name = "unoserver_appx"
+version = "1.0.0"
 description = "A server for file conversions with Libre Office"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -39,7 +39,7 @@ devenv = [
 
 [project.scripts]
 unoserver = "unoserver.server:main"
-unoconvert = "unoserver.client:converter_main"
+unoconvert = "unoserver.converter:main"
 unocompare = "unoserver.client:comparer_main"
 
 [tool.setuptools]
